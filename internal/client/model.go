@@ -19,20 +19,21 @@ type ChatEntry struct {
 }
 
 type Model struct {
-	ws          *WSClient
-	username    string
-	userID      string
-	currentRoom string
-	rooms       []RoomEntry
-	users       []string
-	messages    []ChatEntry
-	viewport    viewport.Model
-	textinput   textinput.Model
-	width       int
-	height      int
-	connected   bool
-	quitting    bool
-	err         error
+	ws           *WSClient
+	username     string
+	userID       string
+	currentRoom  string
+	rooms        []RoomEntry
+	users        []string
+	messages     []ChatEntry
+	viewport     viewport.Model
+	textinput    textinput.Model
+	mentionPopup MentionPopup
+	width        int
+	height       int
+	connected    bool
+	quitting     bool
+	err          error
 }
 
 func NewModel(ws *WSClient, username string) Model {
@@ -44,11 +45,12 @@ func NewModel(ws *WSClient, username string) Model {
 	vp := viewport.New(0, 0)
 
 	return Model{
-		ws:        ws,
-		username:  username,
-		textinput: ti,
-		viewport:  vp,
-		messages:  make([]ChatEntry, 0, 500),
+		ws:           ws,
+		username:     username,
+		textinput:    ti,
+		viewport:     vp,
+		mentionPopup: NewMentionPopup(),
+		messages:     make([]ChatEntry, 0, 500),
 	}
 }
 
@@ -64,6 +66,22 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
+		if m.mentionPopup.Active {
+			switch msg.Type {
+			case tea.KeyUp:
+				m.mentionPopup.MoveUp()
+				return m, nil
+			case tea.KeyDown:
+				m.mentionPopup.MoveDown()
+				return m, nil
+			case tea.KeyTab:
+				m.confirmMention()
+				return m, nil
+			case tea.KeyEsc:
+				m.mentionPopup.Close()
+				return m, nil
+			}
+		}
 		switch msg.Type {
 		case tea.KeyCtrlC:
 			m.quitting = true
@@ -164,6 +182,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	m.textinput, tiCmd = m.textinput.Update(msg)
 	cmds = append(cmds, tiCmd)
 
+	m.detectMention()
+
 	var vpCmd tea.Cmd
 	m.viewport, vpCmd = m.viewport.Update(msg)
 	cmds = append(cmds, vpCmd)
@@ -177,6 +197,7 @@ func (m *Model) handleInput() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	m.textinput.Reset()
+	m.mentionPopup.Close()
 
 	if cmd, ok := ParseCommand(input); ok {
 		m.executeCommand(cmd)
@@ -215,6 +236,64 @@ func (m *Model) removeUser(username string) {
 	}
 }
 
+func (m *Model) detectMention() {
+	value := m.textinput.Value()
+	cursorPos := m.textinput.Position()
+	wasActive := m.mentionPopup.Active
+
+	triggerPos, ok := shouldTriggerMention(value, cursorPos)
+	if ok {
+		query := extractMentionQuery(value, triggerPos, cursorPos)
+		if !m.mentionPopup.Active || m.mentionPopup.TriggerPos != triggerPos {
+			m.mentionPopup.Open(triggerPos, m.filteredUsers(), query)
+		} else {
+			m.mentionPopup.Filter(m.filteredUsers(), query)
+		}
+		if len(m.mentionPopup.Matches) == 0 {
+			m.mentionPopup.Close()
+		}
+	} else if m.mentionPopup.Active {
+		m.mentionPopup.Close()
+	}
+
+	if wasActive != m.mentionPopup.Active {
+		m.updateLayout()
+	}
+}
+
+func (m *Model) confirmMention() {
+	selected := m.mentionPopup.SelectedUser()
+	if selected == "" {
+		m.mentionPopup.Close()
+		return
+	}
+
+	value := m.textinput.Value()
+	runes := []rune(value)
+	cursorPos := m.textinput.Position()
+	triggerPos := m.mentionPopup.TriggerPos
+
+	replacement := []rune("@" + selected + " ")
+	newRunes := make([]rune, 0, len(runes)+len(replacement))
+	newRunes = append(newRunes, runes[:triggerPos]...)
+	newRunes = append(newRunes, replacement...)
+	newRunes = append(newRunes, runes[cursorPos:]...)
+
+	m.textinput.SetValue(string(newRunes))
+	m.textinput.SetCursor(triggerPos + len(replacement))
+	m.mentionPopup.Close()
+}
+
+func (m *Model) filteredUsers() []string {
+	result := make([]string, 0, len(m.users))
+	for _, u := range m.users {
+		if u != m.username {
+			result = append(result, u)
+		}
+	}
+	return result
+}
+
 func (m *Model) updateLayout() {
 	sidebarWidth := 24
 	chatWidth := m.width - sidebarWidth - 3
@@ -227,6 +306,15 @@ func (m *Model) updateLayout() {
 		chatHeight = 3
 	}
 
+	if m.mentionPopup.Active && len(m.mentionPopup.Matches) > 0 {
+		visible := min(m.mentionPopup.MaxVisible, len(m.mentionPopup.Matches))
+		popupHeight := visible + 2
+		chatHeight -= popupHeight
+		if chatHeight < 3 {
+			chatHeight = 3
+		}
+	}
+
 	m.viewport.Width = chatWidth
 	m.viewport.Height = chatHeight
 	m.textinput.Width = m.width - 4
@@ -235,13 +323,20 @@ func (m *Model) updateLayout() {
 
 func (m *Model) updateViewport() {
 	var sb strings.Builder
+	mentionPattern := "@" + m.username
 	for _, msg := range m.messages {
 		if msg.IsSystem {
 			sb.WriteString(systemStyle.Render(msg.Content))
 		} else {
 			ts := dimStyle.Render(fmt.Sprintf("[%s]", msg.Timestamp))
 			name := nameStyle.Render(msg.From + ":")
-			sb.WriteString(fmt.Sprintf("%s %s %s", ts, name, msg.Content))
+			line := fmt.Sprintf("%s %s %s", ts, name, msg.Content)
+			if strings.Contains(msg.Content, mentionPattern) {
+				line = mentionHighlightStyle.Render(
+					fmt.Sprintf("[%s] %s: %s", msg.Timestamp, msg.From, msg.Content),
+				)
+			}
+			sb.WriteString(line)
 		}
 		sb.WriteString("\n")
 	}
@@ -252,15 +347,16 @@ func (m *Model) updateViewport() {
 // --- View ---
 
 var (
-	titleStyle  = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("12"))
-	borderStyle = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("240"))
-	dimStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
-	nameStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("6")).Bold(true)
-	systemStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("3")).Italic(true)
-	activeRoom  = lipgloss.NewStyle().Foreground(lipgloss.Color("10")).Bold(true)
+	titleStyle   = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("12"))
+	borderStyle  = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("240"))
+	dimStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
+	nameStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("6")).Bold(true)
+	systemStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("3")).Italic(true)
+	activeRoom   = lipgloss.NewStyle().Foreground(lipgloss.Color("10")).Bold(true)
 	inactiveRoom = lipgloss.NewStyle().Foreground(lipgloss.Color("7"))
 	statusOnline = lipgloss.NewStyle().Foreground(lipgloss.Color("10"))
 	statusOffline = lipgloss.NewStyle().Foreground(lipgloss.Color("9"))
+	mentionHighlightStyle = lipgloss.NewStyle().Background(lipgloss.Color("3")).Foreground(lipgloss.Color("0"))
 )
 
 func (m Model) View() string {
@@ -275,12 +371,16 @@ func (m Model) View() string {
 	sidebar := m.renderSidebar()
 	chat := m.renderChat()
 	input := m.renderInput()
+	popupView := m.mentionPopup.View()
 
 	sidebarWidth := 24
 	chatWidth := m.width - sidebarWidth - 3
 
 	if chatWidth < 20 {
 		body := lipgloss.JoinVertical(lipgloss.Left, chat)
+		if popupView != "" {
+			return lipgloss.JoinVertical(lipgloss.Left, header, body, popupView, input)
+		}
 		return lipgloss.JoinVertical(lipgloss.Left, header, body, input)
 	}
 
@@ -288,6 +388,9 @@ func (m Model) View() string {
 	sidePanel := lipgloss.NewStyle().Width(sidebarWidth).Render(sidebar)
 	body := lipgloss.JoinHorizontal(lipgloss.Top, chatPanel, " ", sidePanel)
 
+	if popupView != "" {
+		return lipgloss.JoinVertical(lipgloss.Left, header, body, popupView, input)
+	}
 	return lipgloss.JoinVertical(lipgloss.Left, header, body, input)
 }
 
