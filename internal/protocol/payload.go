@@ -79,3 +79,9 @@ type SystemMessagePayload struct {
 	Room    string `json:"room"`
 	Content string `json:"content"`
 }
+
+type UsernameChangedPayload struct {
+	Room    string `json:"room"`
+	OldName string `json:"old_name"`
+	NewName string `json:"new_name"`
+}

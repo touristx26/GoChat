@@ -146,6 +146,22 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		cmds = append(cmds, m.ws.ListenCmd())
 		return m, tea.Batch(cmds...)
 
+	case UsernameChangedMsg:
+		if msg.Room == m.currentRoom {
+			for i, u := range m.users {
+				if u == msg.OldName {
+					m.users[i] = msg.NewName
+					break
+				}
+			}
+			if msg.OldName == m.username {
+				m.username = msg.NewName
+			}
+			m.addSystemMessage(fmt.Sprintf("*** %s is now known as %s", msg.OldName, msg.NewName))
+		}
+		cmds = append(cmds, m.ws.ListenCmd())
+		return m, tea.Batch(cmds...)
+
 	case RoomListMsg:
 		m.rooms = msg.Rooms
 		cmds = append(cmds, m.ws.ListenCmd())

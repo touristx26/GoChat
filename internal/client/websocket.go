@@ -129,6 +129,10 @@ func (ws *WSClient) parseMessage(data []byte) tea.Msg {
 	case protocol.TypeSystemMessage:
 		p, _ := protocol.DecodePayload[protocol.SystemMessagePayload](envelope.Payload)
 		return SystemMsg{Room: p.Room, Content: p.Content}
+
+	case protocol.TypeUsernameChanged:
+		p, _ := protocol.DecodePayload[protocol.UsernameChangedPayload](envelope.Payload)
+		return UsernameChangedMsg{Room: p.Room, OldName: p.OldName, NewName: p.NewName}
 	}
 
 	return nil

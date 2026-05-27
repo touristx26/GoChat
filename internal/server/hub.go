@@ -88,6 +88,21 @@ func (h *Hub) handleSetUsername(client *Client, raw []byte) {
 	oldName := client.Username
 	client.Username = payload.Username
 	log.Printf("client %s set username: %s -> %s", client.ID, oldName, payload.Username)
+
+	for roomName := range client.rooms {
+		h.mu.RLock()
+		room, exists := h.rooms[roomName]
+		h.mu.RUnlock()
+		if !exists {
+			continue
+		}
+		notify, _ := protocol.Encode(protocol.TypeUsernameChanged, protocol.UsernameChangedPayload{
+			Room:    roomName,
+			OldName: oldName,
+			NewName: payload.Username,
+		})
+		room.Broadcast(notify, nil)
+	}
 }
 
 func (h *Hub) handleJoinRoom(client *Client, raw []byte) {

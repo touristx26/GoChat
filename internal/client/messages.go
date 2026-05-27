@@ -60,6 +60,12 @@ type ErrorMsg struct {
 	Message string
 }
 
+type UsernameChangedMsg struct {
+	Room    string
+	OldName string
+	NewName string
+}
+
 type WsMessage struct {
 	Msg tea.Msg
 }

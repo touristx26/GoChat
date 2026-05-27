@@ -21,7 +21,8 @@ const (
 	TypeUserLeft      = "user_left"
 	TypeRoomList      = "room_list"
 	TypeUserList      = "user_list"
-	TypeSystemMessage = "system_message"
+	TypeSystemMessage    = "system_message"
+	TypeUsernameChanged = "username_changed"
 )
 
 type Message struct {
